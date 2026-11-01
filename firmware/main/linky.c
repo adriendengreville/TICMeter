@@ -27,6 +27,7 @@
 #include "tests.h"
 #include "ota.h"
 #include "esp_sleep.h"
+#include "freertos/semphr.h"
 
 /*==============================================================================
  Local Define
@@ -97,6 +98,8 @@ static void linky_create_debug_frame(linky_debug_t debug);
 static time_t linky_decode_time(char *time); // Decode the time
 static void linky_acquire_read_locks();
 static void linky_release_read_locks();
+static void linky_begin_read_window();
+static char linky_end_read_window();
 esp_err_t linky_handle_auto_check();
 
 /*==============================================================================
@@ -362,6 +365,7 @@ uint32_t linky_last_group_count = 0;
 static QueueHandle_t linky_uart_queue;
 static TaskHandle_t linky_uart_task_handle = NULL;
 static bool uart_error = false;
+static SemaphoreHandle_t linky_buffer_mutex = NULL;
 
 /*==============================================================================
 Function Implementation
@@ -433,11 +437,12 @@ static void uart_event_task(void *pvParameters)
             other types of events. If we take too much time on data event, the queue might
             be full.*/
             case UART_DATA:
+                xSemaphoreTake(linky_buffer_mutex, portMAX_DELAY);
                 if (!linky_reading)
                 {
                     uart_flush_input(LINKY_UART);
                     xQueueReset(linky_uart_queue);
-                    linky_frame_size = 0;
+                    xSemaphoreGive(linky_buffer_mutex);
                     break;
                 }
                 uint32_t free_space = (LINKY_BUFFER_SIZE - 1) - linky_frame_size;
@@ -454,6 +459,7 @@ static void uart_event_task(void *pvParameters)
                     linky_decode();
                     // linky_frame_size = 0; // clear the frame size
                 }
+                xSemaphoreGive(linky_buffer_mutex);
                 break;
             // Event of HW FIFO overflow detected
             case UART_FIFO_OVF:
@@ -506,6 +512,11 @@ static void uart_event_task(void *pvParameters)
  */
 void linky_init(int RX)
 {
+    if (linky_buffer_mutex == NULL)
+    {
+        linky_buffer_mutex = xSemaphoreCreateMutex();
+        configASSERT(linky_buffer_mutex != NULL);
+    }
     linky_uart_rx = RX;
     esp_log_level_set(TAG, ESP_LOG_DEBUG);
 
@@ -1242,17 +1253,9 @@ esp_err_t linky_compute()
     return err;
 }
 
-/**
- * @brief Update the data from the Linky
- * Read the UART and decode the frame
- *
- * @return char 1 if success, 0 if error
- */
-char linky_update(uint32_t timeout)
+static void linky_begin_read_window()
 {
-    uint8_t ret;
-
-    linky_acquire_read_locks();
+    xSemaphoreTake(linky_buffer_mutex, portMAX_DELAY);
     linky_frame_size = 0;
     uart_error = false;
     uart_flush_input(LINKY_UART);
@@ -1261,14 +1264,44 @@ char linky_update(uint32_t timeout)
         xQueueReset(linky_uart_queue);
     }
     linky_reading = 1;
+    xSemaphoreGive(linky_buffer_mutex);
+}
+
+static char linky_end_read_window()
+{
+    // Stop collection and decode under the same lock used by the UART task.
+    // An idle UART event must not erase the last buffer before it is decoded.
+    xSemaphoreTake(linky_buffer_mutex, portMAX_DELAY);
+    linky_reading = 0;
+    ESP_LOGI(TAG, "Read window ended: %lu buffered bytes", linky_frame_size);
+    char ret = linky_decode();
+    linky_frame_size = 0;
+    uart_flush_input(LINKY_UART);
+    if (linky_uart_queue != NULL)
+    {
+        xQueueReset(linky_uart_queue);
+    }
+    xSemaphoreGive(linky_buffer_mutex);
+    return ret;
+}
+
+/**
+ * @brief Read the UART and decode the collected Linky data.
+ * @return 1 if successful, 0 if decoding failed.
+ */
+char linky_update(uint32_t timeout)
+{
+    uint8_t ret;
+
+    linky_acquire_read_locks();
     linky_same_feilds_count = 0;
     if (linky_mode > MODE_STD)
     {
         ESP_LOGE(TAG, "Error: Unknown mode: %d", linky_mode);
-        linky_reading = 0;
         linky_release_read_locks();
         return 0;
     }
+    linky_begin_read_window();
     ESP_LOGI(TAG, "Mode: %s", linky_str_mode[linky_mode]);
 
     led_start_pattern(LED_LINKY_READING);
@@ -1287,24 +1320,15 @@ char linky_update(uint32_t timeout)
     //     ESP_LOGI(TAG, "End: Same fields count %ld times", linky_same_feilds_count);
     // }
 
-    linky_reading = 0;
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-
-    ret = linky_decode(); // decode the frame
+    ret = linky_end_read_window();
 
     while (ret == 2 && try < 2) // if the mode is auto, we try the other mode if the first one failed
     {
+        linky_begin_read_window();
         vTaskDelay(5000 / portTICK_PERIOD_MS);
         ESP_LOGI(TAG, "Retry to find the mode");
-        ret = linky_decode(); // decode the frame
+        ret = linky_end_read_window();
         try++;
-    }
-
-    linky_frame_size = 0; // clear the frame size
-    uart_flush_input(LINKY_UART);
-    if (linky_uart_queue != NULL)
-    {
-        xQueueReset(linky_uart_queue);
     }
 
     led_stop_pattern(LED_LINKY_READING);

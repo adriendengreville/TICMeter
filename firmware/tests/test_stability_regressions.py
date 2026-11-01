@@ -88,10 +88,9 @@ class StabilityRegressionTests(unittest.TestCase):
 
         self.assertIn("!linky_reading", body)
         self.assertIn("uart_flush_input(LINKY_UART)", body)
-        self.assertIn("linky_frame_size = 0", body)
 
     def test_linky_update_flushes_stale_uart_data_before_reading(self):
-        body = function_body(read_source("main/linky.c"), "linky_update")
+        body = function_body(read_source("main/linky.c"), "linky_begin_read_window")
 
         self.assertLess(body.index("linky_frame_size = 0"), body.index("linky_reading = 1"))
         self.assertLess(body.index("uart_flush_input(LINKY_UART)"), body.index("linky_reading = 1"))
