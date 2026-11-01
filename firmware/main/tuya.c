@@ -439,6 +439,15 @@ void tuya_fill_index(index_offset_t *out, linky_data_t *linky)
         switch (linky_contract)
         {
         case C_BASE:
+        case C_HC_WE:
+        case C_ZEN_ESTIVAL:
+        case C_SEM_WE:
+        case C_HC_SEM_WE:
+        case C_HC_SEM_WE_LUNDI:
+        case C_HC_SEM_WE_MERCREDI:
+        case C_HC_SEM_WE_VENDREDI:
+            // Keep EAST as the total; these calendars have no verified Tuya
+            // HP/HC index mapping. Raw supplier indexes remain available via MQTT/Zigbee.
             break;
         case C_HC:
         case C_EJP:
@@ -531,6 +540,13 @@ uint8_t tuya_send_data(linky_data_t *linky)
     switch (linky_contract)
     {
     case C_BASE:
+    case C_HC_WE:
+    case C_ZEN_ESTIVAL:
+    case C_SEM_WE:
+    case C_HC_SEM_WE:
+    case C_HC_SEM_WE_LUNDI:
+    case C_HC_SEM_WE_MERCREDI:
+    case C_HC_SEM_WE_VENDREDI:
     {
         cJSON_AddNumberToObject(jsonObject, "111", tuya_cap_value(now.index_total));
     }

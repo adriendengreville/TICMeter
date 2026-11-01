@@ -97,8 +97,6 @@ static void linky_create_debug_frame(linky_debug_t debug);
 static time_t linky_decode_time(char *time); // Decode the time
 static void linky_acquire_read_locks();
 static void linky_release_read_locks();
-static void linky_normalize_contract_text(char *dest, size_t dest_size, const char *src);
-static bool linky_str_contains_token(const char *value, const char *token);
 esp_err_t linky_handle_auto_check();
 
 /*==============================================================================
@@ -332,43 +330,6 @@ const char *const ha_sensors_str[] = {
     [BOOL] = "binary_sensor",
 };
 
-const char *const linky_hist_str_contract[] = {
-    [C_ANY] = "ANY",
-    [C_BASE] = "BASE",
-    [C_HC] = "HC..",
-    [C_EJP] = "EJP.",
-    [C_TEMPO] = "BBR",
-};
-
-const char *const linky_std_str_contract[] = {
-    [C_ANY] = "ANY",
-    [C_BASE] = "BASE",
-    [C_HC] = "H PLEINE/CREUSE",
-    [C_HEURES_SUPER_CREUSES] = "H SUPER CREUSES",
-    [C_TEMPO] = "TEMPO",
-    [C_EJP] = "EJP",
-    [C_ZEN_FLEX] = "ZEN FLEX",
-    [C_SEM_WE_LUNDI] = "SEM WE LUNDI",
-    [C_SEM_WE_MERCREDI] = "SEM WE MERCREDI",
-    [C_SEM_WE_VENDREDI] = "SEM WE VENDREDI",
-    [C_HC_WE] = "HC et Week-End",
-};
-
-const char *const linky_tuya_str_contract[] = {
-    [C_UNKNOWN] = "INCONNU",
-    [C_ANY] = "INCONNU",
-    [C_BASE] = "BASE",
-    [C_HC] = "HCHP",
-    [C_HEURES_SUPER_CREUSES] = "HSC",
-    [C_TEMPO] = "TEMPO",
-    [C_EJP] = "EJP",
-    [C_ZEN_FLEX] = "ZEN_FLEX",
-    [C_SEM_WE_LUNDI] = "SEM_WE_LUNDI",
-    [C_SEM_WE_MERCREDI] = "SEM_WE_MERCREDI",
-    [C_SEM_WE_VENDREDI] = "SEM_WE_VENDREDI",
-    [C_COUNT] = NULL,
-};
-
 const char *const linky_str_mode[] = {
     [MODE_STD] = "STD",
     [MODE_HIST] = "HIST",
@@ -441,7 +402,7 @@ const char *linky_get_str_mode()
 
 const char *linky_get_str_contract()
 {
-    const char *str = linky_std_str_contract[linky_contract];
+    const char *str = linky_contract >= C_UNKNOWN && linky_contract < C_COUNT ? linky_std_str_contract[linky_contract] : NULL;
     if (str == NULL)
     {
         str = "UNKNOWN";
@@ -1443,12 +1404,7 @@ void linky_print()
         ESP_LOGI(TAG, "%s (%s): %s %s", linky_label_list[i].name, linky_label_list[i].label, str_value, class);
     }
 
-    char *contract = (char *)linky_tuya_str_contract[linky_contract];
-    if (contract == NULL)
-    {
-        contract = "";
-    }
-    ESP_LOGI(TAG, "Contract: %s", contract);
+    ESP_LOGI(TAG, "Contract: %s", linky_get_str_contract());
 
     char *mode = (char *)linky_str_mode[linky_mode];
     if (mode == NULL)
@@ -1710,116 +1666,31 @@ void linky_print_debug_frame()
     printf("\n");
 }
 
-static void linky_normalize_contract_text(char *dest, size_t dest_size, const char *src)
-{
-    if (dest_size == 0)
-    {
-        return;
-    }
-
-    size_t out = 0;
-    for (size_t i = 0; src[i] != 0 && out < dest_size - 1; i++)
-    {
-        char c = src[i];
-        if (c <= ' ')
-        {
-            continue;
-        }
-        if (c >= 'a' && c <= 'z')
-        {
-            c = c - ('a' - 'A');
-        }
-        dest[out++] = c;
-    }
-    dest[out] = 0;
-}
-
-static bool linky_str_contains_token(const char *value, const char *token)
-{
-    char value_normalized[32] = {0};
-    char token_normalized[32] = {0};
-
-    linky_normalize_contract_text(value_normalized, sizeof(value_normalized), value);
-    linky_normalize_contract_text(token_normalized, sizeof(token_normalized), token);
-
-    return strstr(value_normalized, token_normalized) != NULL;
-}
-
 linky_contract_t linky_get_contract(linky_data_t *data)
 {
     assert(data != NULL);
-    linky_contract_t contract = C_UNKNOWN;
     char raw[20] = {0};
-    char raw_normalized[32] = {0};
-    char contract_normalized[32] = {0};
+    char tariff[sizeof(data->std.LTARF) + 1] = {0};
     switch (linky_mode)
     {
     case MODE_HIST:
-        strncpy(raw, data->hist.OPTARIF, MIN(sizeof(data->hist.OPTARIF), sizeof(raw)));
+        memcpy(raw, data->hist.OPTARIF, MIN(sizeof(data->hist.OPTARIF), sizeof(raw) - 1));
         break;
     case MODE_STD:
-        strncpy(raw, data->std.NGTF, MIN(sizeof(data->std.NGTF), sizeof(raw)));
+        memcpy(raw, data->std.NGTF, MIN(sizeof(data->std.NGTF), sizeof(raw) - 1));
+        memcpy(tariff, data->std.LTARF, sizeof(data->std.LTARF));
         break;
     default:
         ESP_LOGE(TAG, "linky_get_contract: Unknown linky mode: %d", linky_mode);
         return C_ANY;
-        break;
     }
 
-    linky_normalize_contract_text(raw_normalized, sizeof(raw_normalized), raw);
-
-    switch (linky_mode)
-    {
-    case MODE_HIST:
-        for (int i = 0; i < sizeof(linky_hist_str_contract) / sizeof(linky_hist_str_contract[0]); i++)
-        {
-            if (linky_hist_str_contract[i] == NULL)
-            {
-                continue;
-            }
-            linky_normalize_contract_text(contract_normalized, sizeof(contract_normalized), linky_hist_str_contract[i]);
-            if (strlen(raw_normalized) > 0 &&
-                (strstr(contract_normalized, raw_normalized) != NULL || strstr(raw_normalized, contract_normalized) != NULL))
-            {
-                contract = i;
-                break;
-            }
-        }
-        break;
-    case MODE_STD:
-        for (int i = 0; i < sizeof(linky_std_str_contract) / sizeof(linky_std_str_contract[0]); i++)
-        {
-            if (linky_std_str_contract[i] == NULL)
-            {
-                continue;
-            }
-            // ESP_LOGD(TAG, "compare: \"%s\" \"%s\"", linky_std_str_contract[i], raw);
-            linky_normalize_contract_text(contract_normalized, sizeof(contract_normalized), linky_std_str_contract[i]);
-            if (strlen(raw_normalized) > 0 &&
-                (strstr(contract_normalized, raw_normalized) != NULL || strstr(raw_normalized, contract_normalized) != NULL))
-            {
-                contract = i;
-                break;
-            }
-        }
-        if (contract == C_UNKNOWN &&
-            (linky_str_contains_token(data->std.LTARF, "BLEU") ||
-             linky_str_contains_token(data->std.LTARF, "BLANC") ||
-             linky_str_contains_token(data->std.LTARF, "ROUG")))
-        {
-            contract = C_TEMPO;
-        }
-        break;
-    default:
-        ESP_LOGE(TAG, "linky_get_contract: Unknown linky mode: %d", linky_mode);
-        break;
-    }
+    linky_contract_t contract = linky_contract_detect(linky_mode == MODE_HIST, raw, tariff);
     if (contract == C_UNKNOWN)
     {
         ESP_LOGE(TAG, "Unknown contract: \"%s\"", raw);
         ESP_LOG_BUFFER_HEXDUMP(TAG, raw, sizeof(raw), ESP_LOG_ERROR);
     }
-
     return contract;
 }
 

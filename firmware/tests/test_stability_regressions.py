@@ -83,20 +83,6 @@ class StabilityRegressionTests(unittest.TestCase):
                 f"{label} must be reported as a real-time measurement",
             )
 
-    def test_standard_tempo_contract_can_be_inferred_without_ngtf(self):
-        source = read_source("main/linky.c")
-        body = function_body(source, "linky_get_contract")
-
-        self.assertIn("linky_str_contains_token(data->std.LTARF, \"BLEU\")", body)
-        self.assertIn("contract = C_TEMPO", body)
-
-    def test_contract_matching_normalizes_linky_text(self):
-        source = read_source("main/linky.c")
-        body = function_body(source, "linky_get_contract")
-
-        self.assertIn("linky_normalize_contract_text(raw_normalized", body)
-        self.assertIn("linky_normalize_contract_text(contract_normalized", body)
-
     def test_uart_task_discards_tic_bytes_outside_read_window(self):
         body = function_body(read_source("main/linky.c"), "uart_event_task")
 

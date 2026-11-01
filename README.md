@@ -41,6 +41,9 @@ More info about the product: https://www.kisskissbankbank.com/fr/projects/ticmet
 #### ESP32 :satellite:
 Compile and send [`firmware`](/firmware) files to the ESP32-C6
 
+Supported EDF tariff calendars and TIC codes, including Zen Estival:
+[contract reference](docs/edf-contracts.md).
+
 ## Demo
 
 #### Web example

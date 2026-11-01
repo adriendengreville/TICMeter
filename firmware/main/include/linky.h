@@ -23,6 +23,7 @@
 #include "string.h"
 #include "esp_zigbee_core.h"
 #include "time.h"
+#include "linky_contract.h"
 
 /*==============================================================================
  Public Defines
@@ -220,23 +221,6 @@ typedef enum
 
 typedef enum
 {
-    C_UNKNOWN,
-    C_ANY,
-    C_BASE,
-    C_HC,
-    C_HEURES_SUPER_CREUSES,
-    C_EJP,
-    C_TEMPO,
-    C_ZEN_FLEX,
-    C_SEM_WE_LUNDI,
-    C_SEM_WE_MERCREDI,
-    C_SEM_WE_VENDREDI,
-    C_HC_WE,
-    C_COUNT,
-} linky_contract_t;
-
-typedef enum
-{
     T_ANY,
     T_BASE,
     T_HC,
@@ -339,9 +323,6 @@ typedef enum
 extern const char *const HADeviceClassStr[];
 extern const char *const HAUnitsStr[];
 extern const char *const ha_sensors_str[];
-extern const char *const linky_hist_str_contract[];
-extern const char *const linky_std_str_contract[];
-extern const char *const linky_tuya_str_contract[];
 extern const char *const linky_str_mode[];
 
 extern const linky_value_t linky_label_list[];
