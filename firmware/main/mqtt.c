@@ -32,7 +32,10 @@
 #define REAL_TIME 1
 
 #define MQTT_ID "TICMeter"      // for the home assistant discovery
-#define MQTT_SEND_TIMEOUT 10000 // in ms
+#define MQTT_SEND_TIMEOUT 30000       // in ms, max cap for large HA discovery bursts
+#define MQTT_SEND_BASE_TIMEOUT 5000   // in ms
+#define MQTT_SEND_TIMEOUT_PER_MSG 150 // in ms
+#define MQTT_SEND_STALL_TIMEOUT 5000  // in ms, abort if outbox stops draining
 #define MANUFACTURER "GammaTroniques"
 #define MQTT_QOS 1
 /*==============================================================================
@@ -76,6 +79,8 @@ typedef struct
 ===============================================================================*/
 static void log_error_if_nonzero(const char *message, int error_code);
 static void mqtt_create_sensor(char *json, char *config_topic, linky_value_t sensor);
+static bool mqtt_linky_value_is_supported(const linky_value_t *value);
+static bool mqtt_linky_value_is_valid(const linky_value_t *value);
 void mqtt_setup_ha_discovery(bool with_delete);
 void mqtt_topic_comliance(char *topic, int size);
 void mqtt_disconnect_task(void *pvParameters);
@@ -120,6 +125,62 @@ static void mqtt_remove_plus(char *topic)
         {
             topic[j] = '_';
         }
+    }
+}
+
+static bool mqtt_linky_value_is_supported(const linky_value_t *value)
+{
+    if (value->mode != ANY && value->mode != linky_mode)
+    {
+        return false;
+    }
+
+    if (value->grid == G_MONO && linky_three_phase)
+    {
+        return false;
+    }
+    if (value->grid == G_TRI && !linky_three_phase)
+    {
+        return false;
+    }
+
+    if (value->contract != C_ANY && linky_contract != C_ANY && linky_contract != C_UNKNOWN && value->contract != linky_contract)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static bool mqtt_linky_value_is_valid(const linky_value_t *value)
+{
+    switch (value->type)
+    {
+    case UINT8:
+        return *(uint8_t *)value->data != UINT8_MAX;
+    case UINT16:
+        return *(uint16_t *)value->data != UINT16_MAX;
+    case UINT32:
+        if (*(uint32_t *)value->data == UINT32_MAX)
+        {
+            return false;
+        }
+        return value->device_class != ENERGY || *(uint32_t *)value->data != 0;
+    case UINT64:
+        if (*(uint64_t *)value->data == UINT64_MAX)
+        {
+            return false;
+        }
+        return value->device_class != ENERGY || *(uint64_t *)value->data != 0;
+    case STRING:
+        return strlen((char *)value->data) > 0;
+    case UINT32_TIME:
+        return ((time_label_t *)value->data)->value != UINT32_MAX && ((time_label_t *)value->data)->value != 0;
+    case HA_NUMBER:
+        return false;
+    default:
+        ESP_LOGE(TAG, "Unknown type %d", value->type);
+        return false;
     }
 }
 
@@ -229,7 +290,7 @@ uint8_t mqtt_prepare_publish(linky_data_t *linkydata)
 {
     mqtt_sensors_count = 0;
     mqtt_sent_count = 0;
-    if (mqtt_state == MQTT_DEINIT)
+    if (mqtt_client == NULL || mqtt_state == MQTT_DEINIT)
     {
         ESP_LOGE(TAG, "Cant prepare data: MQTT not initialized");
         return 0;
@@ -251,6 +312,11 @@ uint8_t mqtt_prepare_publish(linky_data_t *linkydata)
     for (int i = 0; i < linky_label_list_size; i++)
     {
         if (linky_label_list[i].mode != linky_mode && linky_label_list[i].mode != ANY)
+        {
+            continue;
+        }
+
+        if (!mqtt_linky_value_is_supported(&linky_label_list[i]))
         {
             continue;
         }
@@ -391,7 +457,6 @@ void mqtt_setup_ha_discovery(bool with_delete)
 {
     char mqtt_buffer[1024];
     char config_topic[100];
-    bool delete = false;
 
     for (int i = 0; i < linky_label_list_size; i++)
     {
@@ -407,59 +472,29 @@ void mqtt_setup_ha_discovery(bool with_delete)
             continue;
         }
 
-        delete = false;
+        bool supported = mqtt_linky_value_is_supported(&linky_label_list[i]);
+        bool valid = mqtt_linky_value_is_valid(&linky_label_list[i]);
+        bool delete = !supported;
 
         ESP_LOGD(TAG, "HA Discovery: %s", linky_label_list[i].label);
         switch (linky_label_list[i].type)
         {
         case UINT8:
-            if (*(uint8_t *)linky_label_list[i].data == UINT8_MAX)
-            {
-                delete = true;
-            }
             ESP_LOGD(TAG, "Adding %s: value = %d", linky_label_list[i].label, *(uint8_t *)linky_label_list[i].data);
             break;
         case UINT16:
-            if (*(uint16_t *)linky_label_list[i].data == UINT16_MAX)
-            {
-                delete = true;
-            }
             ESP_LOGD(TAG, "Adding %s: value = %d", linky_label_list[i].label, *(uint16_t *)linky_label_list[i].data);
             break;
         case UINT32:
-            if (*(uint32_t *)linky_label_list[i].data == UINT32_MAX)
-            {
-                delete = true;
-            }
-            if (linky_label_list[i].device_class == ENERGY && *(uint32_t *)(linky_label_list[i].data) == 0)
-            {
-                delete = true;
-            }
             ESP_LOGD(TAG, "Adding %s: value = %ld", linky_label_list[i].label, *(uint32_t *)linky_label_list[i].data);
             break;
         case UINT64:
-            if (*(uint64_t *)linky_label_list[i].data == UINT64_MAX)
-            {
-                delete = true;
-            }
-            if (linky_label_list[i].device_class == ENERGY && *(uint64_t *)(linky_label_list[i].data) == 0)
-            {
-                delete = true;
-            }
             ESP_LOGD(TAG, "Adding %s: value = %lld", linky_label_list[i].label, *(uint64_t *)linky_label_list[i].data);
             break;
         case STRING:
-            if (strlen((char *)linky_label_list[i].data) == 0)
-            {
-                delete = true;
-            }
             ESP_LOGD(TAG, "Adding %s: value = %s", linky_label_list[i].label, (char *)linky_label_list[i].data);
             break;
         case UINT32_TIME:
-            if (((time_label_t *)linky_label_list[i].data)->value == UINT32_MAX || ((time_label_t *)linky_label_list[i].data)->value == 0)
-            {
-                delete = true;
-            }
             ESP_LOGD(TAG, "Adding %s: value = %lu", linky_label_list[i].label, ((time_label_t *)linky_label_list[i].data)->value);
             break;
         case HA_NUMBER:
@@ -468,12 +503,6 @@ void mqtt_setup_ha_discovery(bool with_delete)
             ESP_LOGE(TAG, "Unknown type %d", linky_label_list[i].type);
             continue;
             break;
-        }
-
-        if (linky_label_list[i].mode == linky_mode || linky_label_list[i].mode == ANY)
-        {
-            // dont delete entity of the current mode
-            ESP_LOGD(TAG, "Dont delete %s: same mode", linky_label_list[i].label);
         }
 
         mqtt_create_sensor(mqtt_buffer, config_topic, linky_label_list[i]);
@@ -488,7 +517,7 @@ void mqtt_setup_ha_discovery(bool with_delete)
                 esp_mqtt_client_enqueue(mqtt_client, config_topic, "", 0, 1, 0, true);
             }
         }
-        else
+        else if (valid || linky_label_list[i].realTime == REAL_TIME)
         {
             if (rw->reported != HA_REPORT_STATE_REPORTED)
             {
@@ -500,6 +529,10 @@ void mqtt_setup_ha_discovery(bool with_delete)
             {
                 ESP_LOGW(TAG, "Already reported %s", linky_label_list[i].label);
             }
+        }
+        else
+        {
+            ESP_LOGD(TAG, "Keep %s discovery unchanged: transient invalid value", linky_label_list[i].label);
         }
 
         mqtt_sensors_count++;
@@ -680,6 +713,12 @@ int mqtt_init(void)
     ESP_LOGW(TAG, "MQTT_DEBUG enabled");
 #endif
 
+    if (mqtt_client != NULL && mqtt_state != MQTT_DEINIT)
+    {
+        ESP_LOGI(TAG, "MQTT already initialized");
+        return 1;
+    }
+
     if (wifi_state == WIFI_DISCONNECTED)
     {
         ESP_LOGI(TAG, "WIFI not connected: MQTT ERROR");
@@ -741,30 +780,46 @@ int mqtt_send()
     }
 #endif
 
-    if (mqtt_state == MQTT_FAILED)
-    {
-        ESP_LOGI(TAG, "MQTT Failed state: reconnecting...");
-        mqtt_state = MQTT_CONNECTING;
-        err = esp_mqtt_client_reconnect(mqtt_client);
-        goto error;
-    }
-
     if (mqtt_client == NULL)
     {
         ESP_LOGW(TAG, "MQTT not initialized, initializing...");
-        mqtt_init();
+        if (mqtt_init() < 0 || mqtt_client == NULL)
+        {
+            ESP_LOGE(TAG, "MQTT initialization failed");
+            goto error;
+        }
+    }
+
+    if (mqtt_state == MQTT_FAILED)
+    {
+        ESP_LOGI(TAG, "MQTT failed state: restarting client");
+        esp_mqtt_client_stop(mqtt_client);
+        mqtt_state = MQTT_CONNECTING;
     }
 
     err = esp_mqtt_client_start(mqtt_client);
+    if (err == ESP_ERR_INVALID_STATE)
+    {
+        ESP_LOGW(TAG, "MQTT client already started");
+        err = ESP_OK;
+    }
     if (err != ESP_OK)
     {
         ESP_LOGE(TAG, "Start failed with 0x%x", err);
         goto error;
     }
 
-    ESP_LOGI(TAG, "Waiting for MQTT send done, outbox size: %d", esp_mqtt_client_get_outbox_size(mqtt_client));
-    time_t mqtt_send_timeout = MILLIS + MQTT_SEND_TIMEOUT;
-    while ((mqtt_send_timeout > MILLIS) && /*mqtt_sent_count < mqtt_sensors_count*/ esp_mqtt_client_get_outbox_size(mqtt_client) > 0)
+    int outbox_size = esp_mqtt_client_get_outbox_size(mqtt_client);
+    ESP_LOGI(TAG, "Waiting for MQTT send done, outbox size: %d", outbox_size);
+    uint32_t mqtt_send_duration = MQTT_SEND_BASE_TIMEOUT + (mqtt_sensors_count * MQTT_SEND_TIMEOUT_PER_MSG);
+    if (mqtt_send_duration > MQTT_SEND_TIMEOUT)
+    {
+        mqtt_send_duration = MQTT_SEND_TIMEOUT;
+    }
+    time_t mqtt_send_timeout = MILLIS + mqtt_send_duration;
+    time_t mqtt_stall_timeout = MILLIS + MQTT_SEND_STALL_TIMEOUT;
+    int last_outbox_size = outbox_size;
+    while ((mqtt_send_timeout > MILLIS) && /*mqtt_sent_count < mqtt_sensors_count*/ outbox_size > 0)
     {
         if (mqtt_state == MQTT_DISCONNETED)
         {
@@ -780,7 +835,18 @@ int mqtt_send()
             // esp_mqtt_client_start(mqtt_client);
         }
         vTaskDelay(100 / portTICK_PERIOD_MS);
-        ESP_LOGD(TAG, "Outbox size: %d", esp_mqtt_client_get_outbox_size(mqtt_client));
+        outbox_size = esp_mqtt_client_get_outbox_size(mqtt_client);
+        if (outbox_size < last_outbox_size)
+        {
+            last_outbox_size = outbox_size;
+            mqtt_stall_timeout = MILLIS + MQTT_SEND_STALL_TIMEOUT;
+        }
+        else if (outbox_size == last_outbox_size && mqtt_stall_timeout < MILLIS)
+        {
+            ESP_LOGE(TAG, "MQTT outbox stalled: %d bytes", outbox_size);
+            break;
+        }
+        ESP_LOGD(TAG, "Outbox size: %d", outbox_size);
     }
 
     // ESP_LOGW(TAG, "set ha_discovery_configured to %d", mqtt_topics.ha_discovery_configured_temp);
@@ -804,7 +870,7 @@ int mqtt_send()
         goto error;
     }
 
-    if (/*mqtt_sent_count < mqtt_sensors_count*/ esp_mqtt_client_get_outbox_size(mqtt_client) > 0)
+    if (/*mqtt_sent_count < mqtt_sensors_count*/ outbox_size > 0)
     {
         ESP_LOGE(TAG, "Send Timeout: %d/%d", mqtt_sent_count, mqtt_sensors_count);
         goto error;
@@ -826,8 +892,11 @@ void mqtt_disconnect_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Disconnecting MQTT");
     mqtt_state = MQTT_DISCONNETED;
-    esp_mqtt_client_disconnect(mqtt_client);
-    esp_mqtt_client_stop(mqtt_client);
+    if (mqtt_client != NULL)
+    {
+        esp_mqtt_client_disconnect(mqtt_client);
+        esp_mqtt_client_stop(mqtt_client);
+    }
     vTaskDelete(NULL);
 }
 

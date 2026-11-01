@@ -294,7 +294,11 @@ void main_task(void *pvParameters)
     {
       ESP_LOGE(MAIN_TAG, "Linky update failed");
       led_start_pattern(LED_LINKY_FAILED);
-      continue;
+      if (!linky_presence())
+      {
+        continue;
+      }
+      ESP_LOGW(MAIN_TAG, "Publishing last known Linky data");
     }
     esp_pm_lock_acquire(main_init_lock);
     linky_print();
@@ -375,15 +379,21 @@ esp_err_t main_send_data(linky_data_t *data)
   case MODE_MQTT_HA: // send data to mqtt server
   {
     linky_free_heap_size = esp_get_free_heap_size();
-    uint8_t ret = mqtt_prepare_publish(data);
-    if (ret == 0)
-    {
-      ESP_LOGE(MAIN_TAG, "Some data will not be sent, but we continue");
-    }
-    ret = wifi_connect();
+    uint8_t ret = wifi_connect();
     if (ret != ESP_OK)
     {
       ESP_LOGE(MAIN_TAG, "Wifi connection failed");
+      goto send_error;
+    }
+    if (mqtt_init() < 0)
+    {
+      ESP_LOGE(MAIN_TAG, "MQTT init failed");
+      goto send_error;
+    }
+    ret = mqtt_prepare_publish(data);
+    if (ret == 0)
+    {
+      ESP_LOGE(MAIN_TAG, "MQTT publish preparation failed");
       goto send_error;
     }
     ESP_LOGI(MAIN_TAG, "Sending data to MQTT");
@@ -474,8 +484,7 @@ esp_err_t main_send_data(linky_data_t *data)
   default:
     break;
   }
-  ESP_LOGI(MAIN_TAG, "Data sent, clear data");
-  linky_clear_data();
+  ESP_LOGI(MAIN_TAG, "Data sent");
   return err;
 }
 
